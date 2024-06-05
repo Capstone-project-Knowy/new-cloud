@@ -9,7 +9,7 @@ import { initializeApp, cert } from "firebase-admin/app";
 import dotenv from 'dotenv';
 
 dotenv.config();
-const serviceAccount = fs.readFileSync("account.json");
+const serviceAccount = JSON.parse(fs.readFileSync("account.json"))
 
 initializeApp({
     credential: cert(serviceAccount),
