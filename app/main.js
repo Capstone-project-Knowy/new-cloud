@@ -1,15 +1,16 @@
 import express from "express";
 import fs from "fs";
 import jwt from "jsonwebtoken";
-import { v4 as uuidv4 } from "uuid";
 import cors from "cors";
 import bcrypt from "bcrypt";
 import { getFirestore } from "firebase-admin/firestore";
 import { initializeApp, cert } from "firebase-admin/app";
 import dotenv from 'dotenv';
+import { customAlphabet } from 'nanoid';
 
 dotenv.config();
-const serviceAccount = JSON.parse(fs.readFileSync("account.json"))
+
+const serviceAccount = JSON.parse(fs.readFileSync("account.json"));
 
 initializeApp({
     credential: cert(serviceAccount),
@@ -24,14 +25,18 @@ const publicKey = fs.readFileSync("private.key.pub");
 server.use(express.json());
 server.use(cors());
 
+// Generate a short unique user ID
+const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 10);
+
 // User management functions
 
-async function storeUserInFirestore(username, email, password) {
+async function storeUserInFirestore(email, username, password) {
     const db = getFirestore();
+    const userId = `user-${nanoid()}`;
     const userRef = db.collection("users").doc(email);
-
     try {
         await userRef.set({
+            userId,
             username,
             email,
             password,
@@ -97,32 +102,56 @@ function createJWT(data) {
     return jwt.sign(data, privateKey, { algorithm: "RS256" });
 }
 
-function verifyJWT(token) {
-    return jwt.verify(token, publicKey);
-}
+const ALLOWED_DOMAIN = 'gmail.com';
 
 // User registration and login
 
 server.post("/register", async (request, response) => {
+    const { email, username, password, confirmPassword } = request.body;
+
+    // Check if the email domain matches the allowed domain
+    const emailDomain = email.split('@')[1];
+    if (emailDomain !== ALLOWED_DOMAIN) {
+        return response.status(403).json({ status: 'error', message: 'Email domain not allowed' });
+    }
+
+    if (password !== confirmPassword) {
+        return response.status(400).json({ status: 'error', message: 'Passwords do not match' });
+    }
+
     try {
-        const { username, email, password } = request.body;
         const hashedPassword = await bcrypt.hash(password, 10);
-        await storeUserInFirestore(username, email, hashedPassword);
-        response.status(200).json({ status: "ok" });
+        await storeUserInFirestore(email, username, hashedPassword);
+        response.status(200).json({ status: "User Created Successfully" });
     } catch (error) {
-        response.status(500).json({ status: "error", message: error.message });
+        response.status(500).json({ status: "Error", message: error.message });
     }
 });
 
 server.post("/login", async (request, response) => {
+    const { email, password } = request.body;
+
+    // Check if the email domain matches the allowed domain
+    const emailDomain = email.split('@')[1];
+    if (emailDomain !== ALLOWED_DOMAIN) {
+        return response.status(403).json({ status: 'error', message: 'Email domain not allowed' });
+    }
+
     try {
-        const { email, password } = request.body;
         const user = await getUserInFirestore(email);
 
-        if (user.exists && (await bcrypt.compare(password, user.get("password")))) {
-            response.status(200).json({ status: "ok", token: createJWT({ email }) });
+        if (user.exists && await bcrypt.compare(password, user.get("password"))) {
+            const token = createJWT({ email, userId: user.get("userId") });
+            response.status(200).json({
+                status: "Successfully Login",
+                loginResult: {
+                    userId: user.get("userId"),
+                    name: user.get("username"),
+                    token: token
+                }
+            });
         } else {
-            response.status(403).json({ status: "error", message: "Invalid password or email" });
+            response.status(403).json({ status: "error", message: "Invalid email or password" });
         }
     } catch (error) {
         response.status(500).json({ status: "error", message: error.message });
@@ -140,21 +169,20 @@ server.post("/logout", authenticateToken, async (request, response) => {
 
 // Profile management
 
-server.put('/profile', authenticateToken, async (req, res) => {
-    const email = req.user.email;
-    const { username, age, gender } = req.body;
+server.put('/profile', authenticateToken, async (request, response) => {
+    const email = request.user.email;
+    const { fullname, username } = request.body;
     const updatedFields = {};
 
+    if (fullname) updatedFields.fullname = fullname;
     if (username) updatedFields.username = username;
-    if (age) updatedFields.age = age;
-    if (gender) updatedFields.gender = gender;
 
     try {
         await updateUserProfile(email, updatedFields);
-        res.status(200).send('User profile updated successfully');
+        response.status(200).json({ status: 'ok', message: 'User profile updated successfully' });
     } catch (error) {
-        console.error(error);
-        res.status(500).send('Error updating user profile');
+        console.error("Error updating user profile:", error);
+        response.status(500).json({ status: 'error', message: 'Error updating user profile' });
     }
 });
 
