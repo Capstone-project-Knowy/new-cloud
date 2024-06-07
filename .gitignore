@@ -2,3 +2,4 @@ node_modules
 account.json
 private.key
 private.key.pub
+.env

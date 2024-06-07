@@ -7,10 +7,27 @@ import { getFirestore } from "firebase-admin/firestore";
 import { initializeApp, cert } from "firebase-admin/app";
 import dotenv from 'dotenv';
 import { customAlphabet } from 'nanoid';
+import rateLimit from 'express-rate-limit';
+import helmet from 'helmet';
+import { body, validationResult } from 'express-validator';
 
 dotenv.config();
 
-const serviceAccount = JSON.parse(fs.readFileSync("account.json"));
+const serviceAccountPath = process.env.SERVICE_ACCOUNT_PATH;
+const privateKeyPath = process.env.PRIVATE_KEY_PATH;
+const publicKeyPath = process.env.PUBLIC_KEY_PATH;
+
+// Debug logging
+console.log('SERVICE_ACCOUNT_PATH:', serviceAccountPath);
+console.log('PRIVATE_KEY_PATH:', privateKeyPath);
+console.log('PUBLIC_KEY_PATH:', publicKeyPath);
+
+if (!serviceAccountPath || !privateKeyPath || !publicKeyPath) {
+    console.error('Error: Missing required environment variables');
+    process.exit(1);
+}
+
+const serviceAccount = JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8'));
 
 initializeApp({
     credential: cert(serviceAccount),
@@ -19,17 +36,24 @@ initializeApp({
 const server = express();
 const port = process.env.PORT || 8080;
 
-const privateKey = fs.readFileSync("private.key");
-const publicKey = fs.readFileSync("private.key.pub");
+const privateKey = fs.readFileSync(privateKeyPath, 'utf8');
+const publicKey = fs.readFileSync(publicKeyPath, 'utf8');
 
 server.use(express.json());
 server.use(cors());
+server.use(helmet());
+
+// Rate limiting
+const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100 // limit each IP to 100 requests per windowMs
+});
+server.use(limiter);
 
 // Generate a short unique user ID
 const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 10);
 
 // User management functions
-
 async function storeUserInFirestore(email, username, password) {
     const db = getFirestore();
     const userId = `user-${nanoid()}`;
@@ -52,6 +76,12 @@ async function getUserInFirestore(email) {
     return await db.collection("users").doc(email).get();
 }
 
+async function getUserByField(field, value) {
+    const db = getFirestore();
+    const usersSnapshot = await db.collection("users").where(field, "==", value).get();
+    return !usersSnapshot.empty;
+}
+
 async function updateUserProfile(email, updatedFields) {
     const db = getFirestore();
     const userRef = db.collection("users").doc(email);
@@ -65,7 +95,6 @@ async function updateUserProfile(email, updatedFields) {
 }
 
 // Token management functions
-
 async function blacklistToken(token) {
     const db = getFirestore();
     await db.collection("blacklistedTokens").doc(token).set({ invalidatedAt: new Date() });
@@ -97,19 +126,26 @@ async function authenticateToken(request, response, next) {
 }
 
 // JWT functions
-
 function createJWT(data) {
-    return jwt.sign(data, privateKey, { algorithm: "RS256" });
+    return jwt.sign(data, privateKey, { algorithm: "RS256", expiresIn: '1h' });
 }
 
 const ALLOWED_DOMAIN = 'gmail.com';
 
 // User registration and login
+server.post("/register", [
+    body('email').isEmail().normalizeEmail(),
+    body('username').trim().escape(),
+    body('password').isLength({ min: 8 }).matches(/^(?=.*[A-Z])(?=.*\d)/),
+    body('confirmPassword').custom((value, { req }) => value === req.body.password)
+], async (request, response) => {
+    const errors = validationResult(request);
+    if (!errors.isEmpty()) {
+        return response.status(400).json({ errors: errors.array() });
+    }
 
-server.post("/register", async (request, response) => {
     const { email, username, password, confirmPassword } = request.body;
 
-    // Check if the email domain matches the allowed domain
     const emailDomain = email.split('@')[1];
     if (emailDomain !== ALLOWED_DOMAIN) {
         return response.status(403).json({ status: 'error', message: 'Email domain not allowed' });
@@ -120,9 +156,24 @@ server.post("/register", async (request, response) => {
     }
 
     try {
+        const emailExists = await getUserInFirestore(email);
+        if (emailExists.exists) {
+            return response.status(400).json({ status: 'error', message: 'Email already exists' });
+        }
+
+        const usernameExists = await getUserByField('username', username);
+        if (usernameExists) {
+            return response.status(400).json({ status: 'error', message: 'Username already exists' });
+        }
+
         const hashedPassword = await bcrypt.hash(password, 10);
+        const passwordExists = await getUserByField('password', hashedPassword);
+        if (passwordExists) {
+            return response.status(400).json({ status: 'error', message: 'Password already exists' });
+        }
+
         await storeUserInFirestore(email, username, hashedPassword);
-        response.status(200).json({ status: "User Created Successfully" });
+        response.status(200).json({ status: 'ok', message: 'User Created Successfully' });
     } catch (error) {
         response.status(500).json({ status: "Error", message: error.message });
     }
@@ -131,7 +182,6 @@ server.post("/register", async (request, response) => {
 server.post("/login", async (request, response) => {
     const { email, password } = request.body;
 
-    // Check if the email domain matches the allowed domain
     const emailDomain = email.split('@')[1];
     if (emailDomain !== ALLOWED_DOMAIN) {
         return response.status(403).json({ status: 'error', message: 'Email domain not allowed' });
@@ -168,7 +218,6 @@ server.post("/logout", authenticateToken, async (request, response) => {
 });
 
 // Profile management
-
 server.put('/profile', authenticateToken, async (request, response) => {
     const email = request.user.email;
     const { fullname, username } = request.body;
