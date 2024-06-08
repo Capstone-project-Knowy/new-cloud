@@ -5,19 +5,20 @@ import cors from "cors";
 import bcrypt from "bcrypt";
 import { getFirestore } from "firebase-admin/firestore";
 import { initializeApp, cert } from "firebase-admin/app";
+import { Storage } from '@google-cloud/storage';
+import multer from 'multer';
+import path from 'path';
 import dotenv from 'dotenv';
 import { customAlphabet } from 'nanoid';
-import rateLimit from 'express-rate-limit';
-import helmet from 'helmet';
-import { body, validationResult } from 'express-validator';
+import moment from 'moment'; // Importing moment library
 
 dotenv.config();
 
 const serviceAccountPath = process.env.SERVICE_ACCOUNT_PATH;
 const privateKeyPath = process.env.PRIVATE_KEY_PATH;
 const publicKeyPath = process.env.PUBLIC_KEY_PATH;
+const bucket = new Storage().bucket(process.env.GCLOUD_STORAGE_BUCKET);
 
-// Debug logging
 console.log('SERVICE_ACCOUNT_PATH:', serviceAccountPath);
 console.log('PRIVATE_KEY_PATH:', privateKeyPath);
 console.log('PUBLIC_KEY_PATH:', publicKeyPath);
@@ -40,20 +41,14 @@ const privateKey = fs.readFileSync(privateKeyPath, 'utf8');
 const publicKey = fs.readFileSync(publicKeyPath, 'utf8');
 
 server.use(express.json());
+server.use(express.urlencoded({ extended: true }));
 server.use(cors());
-server.use(helmet());
-
-// Rate limiting
-const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100 // limit each IP to 100 requests per windowMs
-});
-server.use(limiter);
 
 // Generate a short unique user ID
 const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 10);
 
 // User management functions
+
 async function storeUserInFirestore(email, username, password) {
     const db = getFirestore();
     const userId = `user-${nanoid()}`;
@@ -95,6 +90,7 @@ async function updateUserProfile(email, updatedFields) {
 }
 
 // Token management functions
+
 async function blacklistToken(token) {
     const db = getFirestore();
     await db.collection("blacklistedTokens").doc(token).set({ invalidatedAt: new Date() });
@@ -125,25 +121,52 @@ async function authenticateToken(request, response, next) {
     });
 }
 
+async function storeForumInFirestore(forumId, forumTitle, forumContent, userId, username) {
+    const db = getFirestore();
+    const forumsRef = db.collection("discussions");
+
+    await forumsRef.doc(forumId).set({
+        forumId,
+        forumTitle,
+        forumContent,
+        userId,
+        username,
+        createdAt: new Date()
+    });
+}
+
+async function storeCommentInFirestore(forumId, commentContent, userId, username) {
+    const db = getFirestore();
+    const forumRef = db.collection("discussions").doc(forumId);
+
+    await db.runTransaction(async (transaction) => {
+        const forumDoc = await transaction.get(forumRef);
+        if (!forumDoc.exists) {
+            throw new Error("Forum not found");
+        }
+
+        const forumData = forumDoc.data();
+        const newComment = {
+            commentId: `comment-${nanoid()}`,
+            commentContent,
+            userId,
+            username,
+            createdAt: new Date()
+        };
+        const updatedComments = [...(forumData.comments || []), newComment];
+        transaction.update(forumRef, { comments: updatedComments });
+    });
+}
+
 // JWT functions
+
 function createJWT(data) {
-    return jwt.sign(data, privateKey, { algorithm: "RS256", expiresIn: '1h' });
+    return jwt.sign(data, privateKey, { algorithm: "RS256" });
 }
 
 const ALLOWED_DOMAIN = 'gmail.com';
 
-// User registration and login
-server.post("/register", [
-    body('email').isEmail().normalizeEmail(),
-    body('username').trim().escape(),
-    body('password').isLength({ min: 8 }).matches(/^(?=.*[A-Z])(?=.*\d)/),
-    body('confirmPassword').custom((value, { req }) => value === req.body.password)
-], async (request, response) => {
-    const errors = validationResult(request);
-    if (!errors.isEmpty()) {
-        return response.status(400).json({ errors: errors.array() });
-    }
-
+server.post("/register", async (request, response) => {
     const { email, username, password, confirmPassword } = request.body;
 
     const emailDomain = email.split('@')[1];
@@ -153,6 +176,11 @@ server.post("/register", [
 
     if (password !== confirmPassword) {
         return response.status(400).json({ status: 'error', message: 'Passwords do not match' });
+    }
+
+    const passwordRegex = /^(?=.*[A-Z])(?=.*\d)/;
+    if (!passwordRegex.test(password)) {
+        return response.status(400).json({ status: 'error', message: 'Password must contain at least one uppercase letter and one number' });
     }
 
     try {
@@ -166,12 +194,12 @@ server.post("/register", [
             return response.status(400).json({ status: 'error', message: 'Username already exists' });
         }
 
-        const hashedPassword = await bcrypt.hash(password, 10);
-        const passwordExists = await getUserByField('password', hashedPassword);
+        const passwordExists = await getUserByField('password', await bcrypt.hash(password, 10));
         if (passwordExists) {
             return response.status(400).json({ status: 'error', message: 'Password already exists' });
         }
 
+        const hashedPassword = await bcrypt.hash(password, 10);
         await storeUserInFirestore(email, username, hashedPassword);
         response.status(200).json({ status: 'ok', message: 'User Created Successfully' });
     } catch (error) {
@@ -191,7 +219,7 @@ server.post("/login", async (request, response) => {
         const user = await getUserInFirestore(email);
 
         if (user.exists && await bcrypt.compare(password, user.get("password"))) {
-            const token = createJWT({ email, userId: user.get("userId") });
+            const token = createJWT({ email, userId: user.get("userId"), username: user.get("username") });
             response.status(200).json({
                 status: "Successfully Login",
                 loginResult: {
@@ -218,6 +246,7 @@ server.post("/logout", authenticateToken, async (request, response) => {
 });
 
 // Profile management
+
 server.put('/profile', authenticateToken, async (request, response) => {
     const email = request.user.email;
     const { fullname, username } = request.body;
@@ -235,75 +264,110 @@ server.put('/profile', authenticateToken, async (request, response) => {
     }
 });
 
+server.get("/getUserDetail", authenticateToken, async (request, response) => {
+    const email = request.user.email;
+
+    try {
+        const user = await getUserInFirestore(email);
+
+        if (user.exists) {
+            const userData = {
+                userId: user.get("userId"),
+                username: user.get("username"),
+                fullname: user.get("fullname"), // Assuming fullName is stored in the Firestore document
+                email: user.get("email"),
+            };
+
+            response.status(200).json({ status: "success", user: userData });
+        } else {
+            response.status(404).json({ status: "error", message: "User not found" });
+        }
+    } catch (error) {
+        response.status(500).json({ status: "error", message: error.message });
+    }
+});
+
 // Forum management
 
 // Get discussions
-server.get("/forum", async (request, response) => {
+server.get("/forum", authenticateToken, async (request, response) => {
     const db = getFirestore();
 
     try {
-        const discussionsSnapshot = await db.collection("discussions").get();
-        const discussions = discussionsSnapshot.docs.map(doc => ({
-            id: doc.id,
-            ...doc.data()
-        }));
+        const forumsSnapshot = await db.collection("discussions").get();
+        if (forumsSnapshot.empty) {
+            return response.status(200).json({ status: "success", forums: "There's no Discussion out here" });
+        }
 
-        // Sort discussions by the number of comments
-        discussions.sort((a, b) => (b.comments ? b.comments.length : 0) - (a.comments ? a.comments.length : 0));
-
-        response.status(200).json({ status: 'ok', discussions });
+        const forums = forumsSnapshot.docs.map(doc => {
+            const data = doc.data();
+            return {
+                ...data,
+                createdAt: moment(data.createdAt.toDate()).format('DD-MM-YYYY HH:mm:ss'), // Format to European date format
+                comments: (data.comments || []).map(comment => ({
+                    ...comment,
+                    createdAt: moment(comment.createdAt.toDate()).format('DD-MM-YYYY HH:mm:ss') // Format to European date format
+                }))
+            };
+        });
+        response.status(200).json({ status: "success", forums });
     } catch (error) {
-        console.error("Error fetching discussions:", error);
-        response.status(500).json({ status: 'error', message: 'Error fetching discussions' });
+        response.status(500).json({ status: "error", message: error.message });
+    }
+});
+
+server.get("/forum/:id", authenticateToken, async (request, response) => {
+    const { id: forumId } = request.params; // Extracting forumId from the request parameters
+    const db = getFirestore();
+
+    try {
+        const forumDoc = await db.collection("discussions").doc(forumId).get();
+        if (!forumDoc.exists) {
+            return response.status(404).json({ status: "error", message: "Forum not found" });
+        }
+
+        const forumData = forumDoc.data();
+        const formattedForum = {
+            ...forumData,
+            createdAt: moment(forumData.createdAt.toDate()).format('DD-MM-YYYY HH:mm:ss'), // Format to European date format
+            comments: (forumData.comments || []).map(comment => ({
+                ...comment,
+                createdAt: moment(comment.createdAt.toDate()).format('DD-MM-YYYY HH:mm:ss') // Format to European date format
+            }))
+        };
+
+        response.status(200).json({ status: "success", forum: formattedForum });
+    } catch (error) {
+        response.status(500).json({ status: "error", message: error.message });
     }
 });
 
 // Create a new discussion
-server.post("/forum", authenticateToken, async (request, response) => {
-    const { title, content } = request.body;
-    const email = request.user.email;
-    const db = getFirestore();
+server.post("/addForumDiscussion", authenticateToken, async (request, response) => {
+    const { forumTitle, forumContent } = request.body;
+    const userId = request.user.userId
+    const username = request.user.username
+    const forumId = `forum-${nanoid()}`;
 
     try {
-        const discussionRef = await db.collection("discussions").add({
-            title,
-            content,
-            email,
-            comments: [],
-            createdAt: new Date()
-        });
-
-        response.status(201).json({ status: 'ok', message: 'Discussion created', discussionId: discussionRef.id });
+        await storeForumInFirestore(forumId, forumTitle, forumContent, userId, username);
+        response.status(200).json({ status: "success", message: "Forum topic created successfully" });
     } catch (error) {
-        console.error("Error creating discussion:", error);
-        response.status(500).json({ status: 'error', message: 'Error creating discussion' });
+        response.status(500).json({ status: "error", message: error.message });
     }
 });
 
 // Add a comment to a discussion
-server.post("/forum/:discussionId/comments", authenticateToken, async (request, response) => {
-    const { discussionId } = request.params;
-    const { comment } = request.body;
-    const email = request.user.email;
-    const db = getFirestore();
+server.post("/addForumComments", authenticateToken, async (request, response) => {
+    const { forumId, commentContent } = request.body;
+    const userId = request.user.userId;
+    const username = request.user.username
 
     try {
-        const discussionRef = db.collection("discussions").doc(discussionId);
-        const discussionDoc = await discussionRef.get();
-
-        if (!discussionDoc.exists) {
-            return response.status(404).json({ status: 'error', message: 'Discussion not found' });
-        }
-
-        const discussion = discussionDoc.data();
-        discussion.comments.push({ email, comment, createdAt: new Date() });
-
-        await discussionRef.update({ comments: discussion.comments });
-
-        response.status(201).json({ status: 'ok', message: 'Comment added' });
+        await storeCommentInFirestore(forumId, commentContent, userId, username);
+        response.status(200).json({ status: "success", message: "Comment added successfully" });
     } catch (error) {
-        console.error("Error adding comment:", error);
-        response.status(500).json({ status: 'error', message: 'Error adding comment' });
+        response.status(500).json({ status: "error", message: error.message });
     }
 });
 
