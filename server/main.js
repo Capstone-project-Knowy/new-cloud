@@ -10,7 +10,7 @@ import multer from 'multer';
 import path from 'path';
 import dotenv from 'dotenv';
 import { customAlphabet } from 'nanoid';
-import moment from 'moment'; // Importing moment library
+import moment from 'moment';
 
 dotenv.config();
 
@@ -316,7 +316,7 @@ server.get("/forum", authenticateToken, async (request, response) => {
     }
 });
 
-server.get("/forum/:id", authenticateToken, async (request, response) => {
+server.get("/detailForum/{forumId}", authenticateToken, async (request, response) => {
     const { id: forumId } = request.params; // Extracting forumId from the request parameters
     const db = getFirestore();
 
@@ -337,6 +337,28 @@ server.get("/forum/:id", authenticateToken, async (request, response) => {
         };
 
         response.status(200).json({ status: "success", forum: formattedForum });
+    } catch (error) {
+        response.status(500).json({ status: "error", message: error.message });
+    }
+});
+
+server.get("/comment/{commentId}", authenticateToken, async (request, response) => {
+    const { id: forumId } = request.params; // Extracting forumId from the request parameters
+    const db = getFirestore();
+
+    try {
+        const forumDoc = await db.collection("discussions").doc(forumId).get();
+        if (!forumDoc.exists) {
+            return response.status(404).json({ status: "error", message: "Forum not found" });
+        }
+
+        const forumData = forumDoc.data();
+        const formattedComments = (forumData.comments || []).map(comment => ({
+            ...comment,
+            createdAt: moment(comment.createdAt.toDate()).format('DD-MM-YYYY HH:mm:ss')
+        }));
+
+        response.status(200).json({ status: "success", comments: formattedComments });
     } catch (error) {
         response.status(500).json({ status: "error", message: error.message });
     }
@@ -371,7 +393,227 @@ server.post("/addForumComments", authenticateToken, async (request, response) =>
     }
 });
 
-// Protected route example
+// ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ FITUR UTAMA BELOW APTITUDE & OCEAN Test~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+server.get('/aptitudeQuestions/{testName}', async (request, response) => {
+    const { documentName } = request.params;
+    const db = getFirestore();
+
+    try {
+        const docRef = db.collection('questions').doc(documentName);
+        const doc = await docRef.get();
+
+        if (!doc.exists) {
+            // Create the document if it does not exist
+            await docRef.set({ imageUrls: [] });
+            return response.status(404).json({ status: 'error', message: 'Document not found. Initialized with empty imageUrls array.' });
+        }
+
+        const data = doc.data();
+        if (!data.imageUrls || data.imageUrls.length === 0) {
+            return response.status(404).json({ status: 'error', message: 'No image URLs found in the document' });
+        }
+
+        response.status(200).json({ status: 'success', image_urls: data.imageUrls });
+    } catch (error) {
+        response.status(500).json({ status: 'error', message: error.message });
+    }
+});
+
+server.get('/aptitudeAnswer/{testName}', async (request, response) => {
+    const { documentName } = request.params;
+    const db = getFirestore();
+
+    try {
+        const docRef = db.collection('answerAptitude').doc(documentName);
+        const doc = await docRef.get();
+
+        if (!doc.exists) {
+            await docRef.set({ answers: [] });
+            return response.status(404).json({ status: 'error', message: 'Document not found. Initialized with empty answers array.' });
+        }
+
+        const data = doc.data();
+        if (!data.answers || data.answers.length === 0) {
+            return response.status(404).json({ status: 'error', message: 'Tidak ada KJ' });
+        }
+
+        response.status(200).json({ status: 'success', answers: data.answers });
+    } catch (error) {
+        response.status(500).json({ status: 'error', message: error.message });
+    }
+});
+
+// Endpoint untuk menyimpan skor aptitude & ocean
+server.post('/saveScore/{testName}', authenticateToken, async (request, response) => {
+    const { documentName } = request.params;
+    const { score } = request.body;
+    const userId = request.user.userId;
+    const db = getFirestore();
+
+    try {
+        const scoreRef = db.collection('score').doc(documentName);
+
+        // Retrieve the existing score document
+        const doc = await scoreRef.get();
+
+        let scores = [];
+        if (doc.exists) {
+            const data = doc.data();
+            scores = data.scores || [];
+        } else {
+            // Initialize the document with an empty scores array if it doesn't exist
+            await scoreRef.set({ scores: [] });
+        }
+
+        // Check if userId already exists in the scores array
+        const existingScoreIndex = scores.findIndex(score => score.userId === userId);
+
+        const newScore = {
+            userId,
+            score,
+            timestamp: new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' }) // Convert timestamp to European format
+        };
+
+        if (existingScoreIndex >= 0) {
+            // Overwrite the existing score for the userId
+            scores[existingScoreIndex] = newScore;
+        } else {
+            // Add the new score entry
+            scores.push(newScore);
+        }
+
+        // Save the updated scores array to Firestore
+        await scoreRef.set({ scores }, { merge: true });
+
+        response.status(200).json({ status: 'success', message: 'Score saved successfully', scores });
+    } catch (error) {
+        response.status(500).json({ status: 'error', message: error.message });
+    }
+});
+
+// mengambil skor melalui test name aptitude & ocean
+server.get('/showScore/{testName}', authenticateToken, async (request, response) => {
+    const { documentName } = request.params;
+    const db = getFirestore();
+
+    try {
+        const scoreRef = db.collection('score').doc(documentName);
+        const doc = await scoreRef.get();
+
+        if (!doc.exists) {
+            return response.status(404).json({ status: 'error', message: 'Document not found' });
+        }
+
+        const data = doc.data();
+        if (!data.scores || data.scores.length === 0) {
+            return response.status(404).json({ status: 'error', message: 'No scores found in the document' });
+        }
+
+        response.status(200).json({ status: 'success', scores: data.scores });
+    } catch (error) {
+        response.status(500).json({ status: 'error', message: error.message });
+    }
+});
+
+// mengambil skor melalui userId 
+server.get('/scoreShow/{userId}', authenticateToken, async (request, response) => {
+    const { userId } = request.params;
+    const db = getFirestore();
+
+    try {
+        const scoresCollection = db.collection('score');
+        const scoresSnapshot = await scoresCollection.get();
+        let userScores = [];
+
+        if (scoresSnapshot.empty) {
+            return response.status(404).json({ status: 'error', message: 'No scores found in the collection' });
+        }
+
+        scoresSnapshot.forEach(doc => {
+            const data = doc.data();
+            const scores = data.scores || [];
+            const userScore = scores.find(score => score.userId === userId);
+
+            if (userScore) {
+                userScores.push({
+                    documentName: doc.id,
+                    score: userScore.score,
+                });
+            }
+        });
+
+        if (userScores.length === 0) {
+            return response.status(404).json({ status: 'error', message: 'No scores found for the specified userId' });
+        }
+
+        // Tambahkan userId ke dalam respons
+        response.status(200).json({ status: 'success', userId, scores: userScores });
+    } catch (error) {
+        response.status(500).json({ status: 'error', message: error.message });
+    }
+});
+
+// UNCOMMENT SINTAKS DIBAWAH JIKA INGIN INPUT IMAGE URL
+
+// server.post('/uploadImageUrl', async (request, response) => {
+//     const { imageUrl } = request.body;
+//     const db = getFirestore();
+
+//     try {
+//         const docRef = db.collection('questions').doc('Verbal Reasoning Test');
+//         const doc = await docRef.get();
+
+//         let imageUrls = [];
+//         if (doc.exists) {
+//             const data = doc.data();
+//             imageUrls = data.imageUrls || [];
+//         } else {
+//             // Initialize the document with an empty imageUrls array if it doesn't exist
+//             await docRef.set({ imageUrls: [] });
+//         }
+
+//         imageUrls.push(imageUrl);  // Add new image URL to the end
+//         if (imageUrls.length > 10) {
+//             imageUrls.shift();  // Remove the oldest image URL if the array exceeds 10
+//         }
+
+//         await docRef.set({ imageUrls }, { merge: true });
+//         response.status(200).json({ status: 'success', message: 'Image URL uploaded successfully', image_urls: imageUrls });
+//     } catch (error) {
+//         response.status(500).json({ status: 'error', message: error.message });
+//     }
+// });
+
+// server.post('/uploadAnswer', async (request, response) => {
+//     const { answer } = request.body;
+//     const db = getFirestore();
+
+//     try {
+//         const docRef = db.collection('answerAptitude').doc('Verbal Reasoning Test');
+//         const doc = await docRef.get();
+
+//         let answers = [];
+//         if (doc.exists) {
+//             const data = doc.data();
+//             answers = data.answers || [];
+//         } else {
+//             // Initialize the document with an empty answers array if it doesn't exist
+//             await docRef.set({ answers: [] });
+//         }
+
+//         answers.push(answer);  // Add new image URL to the end
+//         if (answers.length > 10) {
+//             answers.shift();  // Remove the oldest image URL if the array exceeds 10
+//         }
+
+//         await docRef.set({ answers }, { merge: true });
+//         response.status(200).json({ status: 'success', message: 'Jawaban telah di up', answers: answers });
+//     } catch (error) {
+//         response.status(500).json({ status: 'error', message: error.message });
+//     }
+// });
+
 server.get('/protected-route', authenticateToken, (request, response) => {
     response.json({ status: 'ok', message: 'This is a protected route' });
 });
