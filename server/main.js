@@ -316,7 +316,7 @@ server.get("/forum", authenticateToken, async (request, response) => {
     }
 });
 
-server.get("/detailForum/{forumId}", authenticateToken, async (request, response) => {
+server.get("/detailForum/:id", authenticateToken, async (request, response) => {
     const { id: forumId } = request.params; // Extracting forumId from the request parameters
     const db = getFirestore();
 
@@ -342,7 +342,7 @@ server.get("/detailForum/{forumId}", authenticateToken, async (request, response
     }
 });
 
-server.get("/comment/{commentId}", authenticateToken, async (request, response) => {
+server.get("/comment/:id", authenticateToken, async (request, response) => {
     const { id: forumId } = request.params; // Extracting forumId from the request parameters
     const db = getFirestore();
 
@@ -395,7 +395,7 @@ server.post("/addForumComments", authenticateToken, async (request, response) =>
 
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ FITUR UTAMA BELOW APTITUDE & OCEAN Test~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-server.get('/aptitudeQuestions/{testName}', async (request, response) => {
+server.get('/aptitudeQuestions/:documentName', async (request, response) => {
     const { documentName } = request.params;
     const db = getFirestore();
 
@@ -420,7 +420,32 @@ server.get('/aptitudeQuestions/{testName}', async (request, response) => {
     }
 });
 
-server.get('/aptitudeAnswer/{testName}', async (request, response) => {
+server.get('/oceanQuestions/:documentName', async (request, response) => {
+    const { documentName } = request.params;
+    const db = getFirestore();
+
+    try {
+        const docRef = db.collection('questions').doc(documentName);
+        const doc = await docRef.get();
+
+        if (!doc.exists) {
+            // Create the document if it does not exist
+            await docRef.set({ Questions: [] });
+            return response.status(404).json({ status: 'error', message: 'Document not found. Initialized with empty Questions array.' });
+        }
+
+        const data = doc.data();
+        if (!data.Questions || data.Questions.length === 0) {
+            return response.status(404).json({ status: 'error', message: 'No Questions found in the document' });
+        }
+
+        response.status(200).json({ status: 'success', Questions: data.Questions });
+    } catch (error) {
+        response.status(500).json({ status: 'error', message: error.message });
+    }
+});
+
+server.get('/aptitudeAnswer/:documentName', async (request, response) => {
     const { documentName } = request.params;
     const db = getFirestore();
 
@@ -445,7 +470,7 @@ server.get('/aptitudeAnswer/{testName}', async (request, response) => {
 });
 
 // Endpoint untuk menyimpan skor aptitude & ocean
-server.post('/saveScore/{testName}', authenticateToken, async (request, response) => {
+server.post('/saveScore/:documentName', authenticateToken, async (request, response) => {
     const { documentName } = request.params;
     const { score } = request.body;
     const userId = request.user.userId;
@@ -486,14 +511,14 @@ server.post('/saveScore/{testName}', authenticateToken, async (request, response
         // Save the updated scores array to Firestore
         await scoreRef.set({ scores }, { merge: true });
 
-        response.status(200).json({ status: 'success', message: 'Score saved successfully', scores });
+        response.status(200).json({ status: 'success', message: 'Score saved successfully' });
     } catch (error) {
         response.status(500).json({ status: 'error', message: error.message });
     }
 });
 
 // mengambil skor melalui test name aptitude & ocean
-server.get('/showScore/{testName}', authenticateToken, async (request, response) => {
+server.get('/showScore/:documentName', authenticateToken, async (request, response) => {
     const { documentName } = request.params;
     const db = getFirestore();
 
@@ -517,7 +542,7 @@ server.get('/showScore/{testName}', authenticateToken, async (request, response)
 });
 
 // mengambil skor melalui userId 
-server.get('/scoreShow/{userId}', authenticateToken, async (request, response) => {
+server.get('/scoreShow/:userId', authenticateToken, async (request, response) => {
     const { userId } = request.params;
     const db = getFirestore();
 
