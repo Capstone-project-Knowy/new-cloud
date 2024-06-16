@@ -121,42 +121,36 @@ async function authenticateToken(request, response, next) {
     });
 }
 
-async function storeForumInFirestore(forumId, forumTitle, forumContent, userId, username) {
+const storeForumInFirestore = async (forumId, forumTitle, forumContent, userId, username) => {
     const db = getFirestore();
-    const forumsRef = db.collection("discussions");
-
-    await forumsRef.doc(forumId).set({
+    const newForum = {
         forumId,
         forumTitle,
         forumContent,
         userId,
         username,
-        createdAt: new Date()
-    });
-}
+        createdAt: new Date(),
+        comments: []
+    };
+    await db.collection('discussions').doc(forumId).set(newForum);
+};
 
-async function storeCommentInFirestore(forumId, commentContent, userId, username) {
+const storeCommentInFirestore = async (forumId, commentContent, userId, username) => {
     const db = getFirestore();
-    const forumRef = db.collection("discussions").doc(forumId);
-
-    await db.runTransaction(async (transaction) => {
-        const forumDoc = await transaction.get(forumRef);
-        if (!forumDoc.exists) {
-            throw new Error("Forum not found");
-        }
-
-        const forumData = forumDoc.data();
-        const newComment = {
-            commentId: `comment-${nanoid()}`,
-            commentContent,
-            userId,
-            username,
-            createdAt: new Date()
-        };
-        const updatedComments = [...(forumData.comments || []), newComment];
-        transaction.update(forumRef, { comments: updatedComments });
-    });
-}
+    const forumDoc = await db.collection('discussions').doc(forumId).get();
+    if (!forumDoc.exists) {
+        throw new Error('Forum not found');
+    }
+    const forumData = forumDoc.data();
+    const newComment = {
+        commentContent,
+        userId,
+        username,
+        createdAt: new Date()
+    };
+    const updatedComments = [newComment, ...(forumData.comments || [])];
+    await db.collection('discussions').doc(forumId).update({ comments: updatedComments });
+};
 
 // JWT functions
 
@@ -294,7 +288,7 @@ server.get("/forum", authenticateToken, async (request, response) => {
     const db = getFirestore();
 
     try {
-        const forumsSnapshot = await db.collection("discussions").get();
+        const forumsSnapshot = await db.collection("discussions").orderBy("createdAt", "desc").get();
         if (forumsSnapshot.empty) {
             return response.status(200).json({ status: "success", forums: "There's no Discussion out here" });
         }
@@ -303,21 +297,23 @@ server.get("/forum", authenticateToken, async (request, response) => {
             const data = doc.data();
             return {
                 ...data,
-                createdAt: moment(data.createdAt.toDate()).format('DD-MM-YYYY HH:mm:ss'), // Format to European date format
+                createdAt: moment(data.createdAt.toDate()).format('DD-MM-YYYY HH:mm:ss'),
                 comments: (data.comments || []).map(comment => ({
                     ...comment,
-                    createdAt: moment(comment.createdAt.toDate()).format('DD-MM-YYYY HH:mm:ss') // Format to European date format
+                    createdAt: moment(comment.createdAt.toDate()).format('DD-MM-YYYY HH:mm:ss')
                 }))
             };
         });
+
         response.status(200).json({ status: "success", forums });
     } catch (error) {
         response.status(500).json({ status: "error", message: error.message });
     }
 });
 
+
 server.get("/detailForum/:id", authenticateToken, async (request, response) => {
-    const { id: forumId } = request.params; // Extracting forumId from the request parameters
+    const { id: forumId } = request.params;
     const db = getFirestore();
 
     try {
@@ -329,10 +325,10 @@ server.get("/detailForum/:id", authenticateToken, async (request, response) => {
         const forumData = forumDoc.data();
         const formattedForum = {
             ...forumData,
-            createdAt: moment(forumData.createdAt.toDate()).format('DD-MM-YYYY HH:mm:ss'), // Format to European date format
-            comments: (forumData.comments || []).map(comment => ({
+            createdAt: moment(forumData.createdAt.toDate()).format('DD-MM-YYYY HH:mm:ss'),
+            comments: (forumData.comments || []).sort((a, b) => b.createdAt.toDate() - a.createdAt.toDate()).map(comment => ({
                 ...comment,
-                createdAt: moment(comment.createdAt.toDate()).format('DD-MM-YYYY HH:mm:ss') // Format to European date format
+                createdAt: moment(comment.createdAt.toDate()).format('DD-MM-YYYY HH:mm:ss')
             }))
         };
 
@@ -342,8 +338,9 @@ server.get("/detailForum/:id", authenticateToken, async (request, response) => {
     }
 });
 
+
 server.get("/comment/:id", authenticateToken, async (request, response) => {
-    const { id: forumId } = request.params; // Extracting forumId from the request parameters
+    const { id: forumId } = request.params;
     const db = getFirestore();
 
     try {
@@ -353,7 +350,7 @@ server.get("/comment/:id", authenticateToken, async (request, response) => {
         }
 
         const forumData = forumDoc.data();
-        const formattedComments = (forumData.comments || []).map(comment => ({
+        const formattedComments = (forumData.comments || []).sort((a, b) => b.createdAt.toDate() - a.createdAt.toDate()).map(comment => ({
             ...comment,
             createdAt: moment(comment.createdAt.toDate()).format('DD-MM-YYYY HH:mm:ss')
         }));
@@ -364,11 +361,12 @@ server.get("/comment/:id", authenticateToken, async (request, response) => {
     }
 });
 
+
 // Create a new discussion
 server.post("/addForumDiscussion", authenticateToken, async (request, response) => {
     const { forumTitle, forumContent } = request.body;
-    const userId = request.user.userId
-    const username = request.user.username
+    const userId = request.user.userId;
+    const username = request.user.username;
     const forumId = `forum-${nanoid()}`;
 
     try {
@@ -383,7 +381,7 @@ server.post("/addForumDiscussion", authenticateToken, async (request, response) 
 server.post("/addForumComments", authenticateToken, async (request, response) => {
     const { forumId, commentContent } = request.body;
     const userId = request.user.userId;
-    const username = request.user.username
+    const username = request.user.username;
 
     try {
         await storeCommentInFirestore(forumId, commentContent, userId, username);
