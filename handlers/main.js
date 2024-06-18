@@ -152,6 +152,45 @@ const storeCommentInFirestore = async (forumId, commentContent, userId, username
     await db.collection('discussions').doc(forumId).update({ comments: updatedComments });
 };
 
+const updateUsernameInDiscussionsAndComments = async (userId, newUsername) => {
+    const db = getFirestore();
+    const forumsSnapshot = await db.collection("discussions").where("userId", "==", userId).get();
+    const batch = db.batch();
+
+    // Update forums
+    forumsSnapshot.forEach(doc => {
+        const forumData = doc.data();
+        batch.update(doc.ref, { username: newUsername });
+
+        // Update comments in each forum
+        const updatedComments = (forumData.comments || []).map(comment => {
+            if (comment.userId === userId) {
+                return { ...comment, username: newUsername };
+            }
+            return comment;
+        });
+
+        batch.update(doc.ref, { comments: updatedComments });
+    });
+
+    // Update comments in other forums where the user has commented
+    const allForumsSnapshot = await db.collection("discussions").get();
+    allForumsSnapshot.forEach(doc => {
+        const forumData = doc.data();
+
+        const updatedComments = (forumData.comments || []).map(comment => {
+            if (comment.userId === userId) {
+                return { ...comment, username: newUsername };
+            }
+            return comment;
+        });
+
+        batch.update(doc.ref, { comments: updatedComments });
+    });
+
+    await batch.commit();
+};
+
 // JWT functions
 
 function createJWT(data) {
@@ -243,6 +282,7 @@ server.post("/logout", authenticateToken, async (request, response) => {
 
 server.put('/profile', authenticateToken, async (request, response) => {
     const email = request.user.email;
+    const userId = request.user.userId;
     const { fullname, username } = request.body;
     const updatedFields = {};
 
@@ -251,6 +291,12 @@ server.put('/profile', authenticateToken, async (request, response) => {
 
     try {
         await updateUserProfile(email, updatedFields);
+
+        if (username) {
+            
+            await updateUsernameInDiscussionsAndComments(userId, username);
+        }
+
         response.status(200).json({ status: 'ok', message: 'User profile updated successfully' });
     } catch (error) {
         console.error("Error updating user profile:", error);
@@ -494,7 +540,7 @@ server.post('/saveScore/:documentName', authenticateToken, async (request, respo
 
         const newScore = {
             userId,
-            score,
+            score: parseFloat(score),
             timestamp: new Date().toLocaleString('en-GB', { timeZone: 'Europe/London' }) // Convert timestamp to European format
         };
 
@@ -544,6 +590,9 @@ server.get('/scoreShow/:userId', authenticateToken, async (request, response) =>
     const { userId } = request.params;
     const db = getFirestore();
 
+    // Define the custom order for document names
+    const customOrder = ['Openness Test', 'Conscientiousness Test', 'Extraversion Test', 'Agreeableness Test','Neuroticism Test', 'Numerical Aptitude Test', 'Spatial Aptitude Test', 'Perceptual Aptitude Test','Abstract Reasoning Test','Verbal Reasoning Test' ]; // Replace with your actual document names
+
     try {
         const scoresCollection = db.collection('score');
         const scoresSnapshot = await scoresCollection.get();
@@ -570,7 +619,12 @@ server.get('/scoreShow/:userId', authenticateToken, async (request, response) =>
             return response.status(404).json({ status: 'error', message: 'No scores found for the specified userId' });
         }
 
-        // Tambahkan userId ke dalam respons
+        // Sort the userScores array based on the custom order
+        userScores.sort((a, b) => {
+            return customOrder.indexOf(a.documentName) - customOrder.indexOf(b.documentName);
+        });
+
+        // Add userId to the response
         response.status(200).json({ status: 'success', userId, scores: userScores });
     } catch (error) {
         response.status(500).json({ status: 'error', message: error.message });
