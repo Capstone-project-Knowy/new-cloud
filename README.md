@@ -1,5 +1,6 @@
 # Knowy App Backend
-Welcome to the place where the backend of this application's hard work pays off! 
+Welcome to the place where the backend of this application's hard work pays off!
+![Sigma]([https://github.githubassets.com/images/modules/logos_page/GitHub-Mark.png](https://tenor.com/view/pout-kiss-blowing-a-kiss-suspense-christian-bale-gif-16931550113965916217))
 ## Programming Language
 So basicly, we're using two API's for the Backend and inevitably we have to use 2 different languages:
 1. Javascript
